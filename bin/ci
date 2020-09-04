@@ -1,0 +1,166 @@
+#!/usr/bin/env python
+
+import argparse
+from distutils.core import run_setup
+import logging
+from logging.handlers import RotatingFileHandler
+from io import BytesIO
+import os
+import sys
+import subprocess
+
+from behave.configuration import read_configuration, Configuration
+from behave.__main__ import run_behave
+import coverage
+from junitparser import JUnitXml
+from pylint.lint import Run as RunPylint
+import pytest
+
+def make_logger(name, stream_level=logging.WARN, file_level=logging.DEBUG):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(stream_level)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    file_handler = RotatingFileHandler(f"{name}.log", backupCount=1, maxBytes=65536)
+    file_handler.setLevel(file_level)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    file_handler.doRollover()
+    return logger
+
+def tee_command(logger, command):
+    lines = command()
+    for line in lines:
+        logger.info(line)
+
+class CLI():
+    DEFAULT_MINIMUM_PASS_RATE = 100
+    DEFAULT_MINIMUM_COVERAGE = 75
+    DEFAULT_MINIMUM_QUALITY = 9.0
+
+    def __init__(self):
+        raise NotImplemented("CLI is staticmethods only")
+
+    @staticmethod
+    def process_globals(args):
+        CLI.home = args.home
+        CLI.logger = make_logger("ci", stream_level=logging.DEBUG if args.verbose else logging.WARN, file_level=logging.DEBUG)
+
+    @staticmethod
+    def install(args):
+        return subprocess.run(["python3", os.path.join(CLI.home, "setup.py"), "install"], check=True)
+
+    @staticmethod
+    def lint(args):
+        CLI.logger.info("Linting code")
+        results = RunPylint(["librtl", "--rcfile", os.path.join(CLI.home, ".pylintrc")], do_exit=False)
+        score = round(results.linter.stats["global_note"], 2)
+        CLI.logger.info(f"Scored {score}")
+        if score < args.minimum_quality:
+            CLI.logger.error(f"Scored of {score} must be more than {args.minimum_quality} to proceed")
+            return False
+        return True
+
+    @staticmethod
+    def unit(args):
+        CLI.logger.info("Running unit tests")
+        report_location = os.path.join(args.home, "unit.xml")
+        mod_location = os.path.join(args.home, "librtl")
+        status_code = pytest.main(
+            [
+                "-x",
+                os.path.join(CLI.home, "tests"),
+                f"--junitxml={report_location}",
+                f"--cov={mod_location}" 
+            ]
+        )
+        xml = JUnitXml.fromfile(report_location)
+        non_pass = sum([xml.failures, xml.errors, xml.skipped])
+        passing = xml.tests - non_pass
+        score = round((passing / xml.tests) * 100, 2)
+        CLI.logger.info(f"Scored {score}/100.0")
+        if score < args.minimum_pass_rate:
+            CLI.logger.error(f"Scored {score} must be at least {args.minimum_pass_rate} to proceed")
+            return False
+        return True
+
+    @staticmethod
+    def cov(args):
+        CLI.logger.info("Checking code coverage")
+        pycov = coverage.Coverage()
+        pycov.load()
+        score = round(pycov.xml_report(), 2)
+        CLI.logger.info(f"Scored {score}/100.0")
+        if score < args.minimum_coverage:
+            CLI.logger.error(f"Scored {score} must be at least {args.minimum_coverage} to proceed")
+            return False
+        return True
+
+    @staticmethod
+    def integration(args):
+        CLI.logger.info("Running integration tests")
+        config = Configuration(load_config=False, **read_configuration(os.path.join(CLI.home, ".behaverc")))
+        config.paths = [os.path.join(CLI.home, "features")]
+        run_behave(config)
+        return False
+
+    @staticmethod
+    def run_all(args):
+        args.minimum_quality = CLI.DEFAULT_MINIMUM_QUALITY
+        args.minimum_pass_rate = CLI.DEFAULT_MINIMUM_PASS_RATE
+        args.minimum_coverage = CLI.DEFAULT_MINIMUM_COVERAGE
+        if CLI.install(args):
+            CLI.logger.info("Install complete")
+        else: 
+            return False
+        if CLI.lint(args):
+            CLI.logger.info("Lint complete")
+        else:
+            return False
+        if CLI.unit(args):
+            CLI.logger.info("Unit complete")
+        else:
+            return False
+        if CLI.cov(args):
+            CLI.logger.info("Coverage complete")
+        else:
+            return False
+        if CLI.integration(args):
+            CLI.logger.info("Integration complete")
+        else:
+            return False
+        return True
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="ci")
+    parser.add_argument("--home", default=os.getcwd(), help="set the 'home' location to build from")
+    parser.add_argument("--verbose", action="store_true", default=False, help="set the logging output for stdout to DEBUG")
+    parser.set_defaults(func=CLI.run_all)
+    subparsers = parser.add_subparsers(title="command", dest="command")
+   
+    install_parser = subparsers.add_parser("install")
+    install_parser.set_defaults(func=CLI.install)
+
+    lint_parser = subparsers.add_parser("lint")
+    lint_parser.add_argument("--minimum-quality", default=CLI.DEFAULT_MINIMUM_QUALITY, help="minimum percentage of code quality required")
+    lint_parser.set_defaults(func=CLI.lint)
+
+    unit_parser = subparsers.add_parser("unit")
+    unit_parser.add_argument("--minimum-pass-rate", default=CLI.DEFAULT_MINIMUM_PASS_RATE, help="minimum percentage of passing tests")
+    unit_parser.set_defaults(func=CLI.unit)
+
+    cov_parser = subparsers.add_parser("cov")
+    cov_parser.add_argument("--minimum-coverage", default=CLI.DEFAULT_MINIMUM_COVERAGE, help="minimum branch coverage for unit tests")
+    cov_parser.set_defaults(func=CLI.cov)
+
+    integration_parser = subparsers.add_parser("int")
+    integration_parser.set_defaults(func=CLI.integration)
+
+    args = parser.parse_args()
+    func = args.func
+    del args.func
+    CLI.process_globals(args)
+    sys.exit(0 if func(args) else 1)

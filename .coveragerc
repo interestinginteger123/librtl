@@ -1,0 +1,8 @@
+[run]
+include = librtl/*
+branch = True
+disable_warnings = True
+omit = **/*/__version__.py, **/templates/*, librtl/cli.py
+
+[report]
+ignore_errors = True

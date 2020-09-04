@@ -1,0 +1,4 @@
+name: "{{name}}"
+schemaVersion: "1.0.0"
+componentTemplate: "{{component_template}}"
+componentVersion: "0.0.0"

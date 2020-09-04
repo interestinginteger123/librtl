@@ -1,0 +1,12 @@
+.venv
+__pycache__
+*.log*
+*.egg-info
+build
+dist
+*.pyc
+coverage.xml
+.coverage
+unit.xml
+pretty.output
+reports

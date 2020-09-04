@@ -1,0 +1,4 @@
+azure-devops==5.1.0b3
+GitPython==3.0.2
+Jinja2==2.10.1
+msrest==0.6.9
